@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: townhall-signaling-server
+    env: node
+    plan: free
+    rootDir: signaling-server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 20.x
+      - key: RING_TIMEOUT_MS
+        value: "30000"
+      - key: HEARTBEAT_INTERVAL_MS
+        value: "15000"
+      - key: HEARTBEAT_TIMEOUT_MS
+        value: "10000"
