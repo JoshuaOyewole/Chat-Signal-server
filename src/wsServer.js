@@ -23,8 +23,18 @@ function attachWsServer(httpServer) {
 
   wss.on('connection', (ws) => {
     ws.isAlive = true;
+    let pongTimeout = null;
+
+    const clearPongTimeout = () => {
+      if (pongTimeout) {
+        clearTimeout(pongTimeout);
+        pongTimeout = null;
+      }
+    };
+
     ws.on('pong', () => {
       ws.isAlive = true;
+      clearPongTimeout();
     });
 
     ws.on('message', (raw) => {
@@ -39,24 +49,37 @@ function attachWsServer(httpServer) {
     });
 
     ws.on('close', () => {
+      clearPongTimeout();
       handleDisconnect(ws);
     });
-  });
 
-  // Heartbeat: ping every interval; terminate sockets that didn't pong in time.
-  const heartbeat = setInterval(() => {
-    wss.clients.forEach((ws) => {
-      if (!ws.isAlive) {
-        logger.warn('Heartbeat timeout, terminating socket for', ws.userId || '(unregistered)');
-        ws.terminate();
-        return;
-      }
+    // Exposed so the heartbeat interval below can start a bounded per-socket
+    // timeout right after each ping, instead of only noticing a dead socket
+    // on the NEXT interval tick (which doubles worst-case detection time —
+    // a socket that dies right after being marked alive from a ping sent a
+    // moment earlier won't be caught until the cycle after that).
+    ws._sendHeartbeatPing = () => {
       ws.isAlive = false;
       ws.ping();
+      clearPongTimeout();
+      pongTimeout = setTimeout(() => {
+        if (!ws.isAlive) {
+          logger.warn('Heartbeat timeout, terminating socket for', ws.userId || '(unregistered)');
+          ws.terminate();
+        }
+      }, HEARTBEAT_TIMEOUT_MS);
+    };
+  });
+
+  // Heartbeat: ping every interval; each ping starts its own
+  // HEARTBEAT_TIMEOUT_MS deadline (set up per-connection above), so a dead
+  // socket is terminated within one interval + one timeout of actually
+  // dying, not up to two full intervals.
+  const heartbeat = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      ws._sendHeartbeatPing?.();
     });
   }, HEARTBEAT_INTERVAL_MS);
-  // Give each ping HEARTBEAT_TIMEOUT_MS to be answered before the next cycle marks it dead.
-  void HEARTBEAT_TIMEOUT_MS;
 
   wss.on('close', () => clearInterval(heartbeat));
 
