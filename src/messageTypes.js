@@ -2,6 +2,7 @@
 module.exports = {
   REGISTER: 'register',
   REGISTERED: 'registered',
+  REGISTER_PUSH_TOKEN: 'register-push-token',
   CALL_INVITE: 'call-invite',
   CALL_RING: 'call-ring',
   SDP_OFFER: 'sdp-offer',

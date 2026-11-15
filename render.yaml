@@ -16,3 +16,21 @@ services:
         value: "15000"
       - key: HEARTBEAT_TIMEOUT_MS
         value: "10000"
+      # Optional — set this in the Render dashboard (not synced from the
+      # repo) to the Firebase service account JSON's full contents, to
+      # enable waking closed apps via push. Leave unset to disable.
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      # Required for accounts/calling — set these in the Render dashboard,
+      # not synced from the repo. See README's "Account setup" section.
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: OTP_HASH_SECRET
+        sync: false
+      # Optional — unset means OTP codes are logged instead of emailed.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false

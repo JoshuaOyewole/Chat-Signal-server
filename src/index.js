@@ -1,19 +1,21 @@
 const http = require('http');
+const express = require('express');
 const { attachWsServer } = require('./wsServer');
+const authRouter = require('./routes/auth');
 const logger = require('./logger');
 
 const PORT = process.env.PORT || 3000;
 
-const server = http.createServer((req, res) => {
-  if (req.url === '/healthz') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('ok');
-    return;
-  }
-  res.writeHead(404, { 'Content-Type': 'text/plain' });
-  res.end('not found');
+const app = express();
+app.use(express.json());
+
+app.get('/healthz', (req, res) => {
+  res.type('text/plain').send('ok');
 });
 
+app.use('/auth', authRouter);
+
+const server = http.createServer(app);
 attachWsServer(server);
 
 server.listen(PORT, () => {

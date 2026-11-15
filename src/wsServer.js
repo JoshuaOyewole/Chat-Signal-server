@@ -1,6 +1,9 @@
 const { WebSocketServer } = require('ws');
 const clientRegistry = require('./clientRegistry');
 const callStore = require('./callStore');
+const pushTokenStore = require('./pushTokenStore');
+const pushSender = require('./pushSender');
+const tokens = require('./tokens');
 const T = require('./messageTypes');
 const logger = require('./logger');
 
@@ -90,6 +93,8 @@ function handleMessage(ws, msg) {
   switch (msg.type) {
     case T.REGISTER:
       return onRegister(ws, msg);
+    case T.REGISTER_PUSH_TOKEN:
+      return onRegisterPushToken(ws, msg);
     case T.CALL_INVITE:
       return onCallInvite(ws, msg);
     case T.SDP_OFFER:
@@ -109,30 +114,69 @@ function handleMessage(ws, msg) {
   }
 }
 
+// Identity now comes entirely from a server-issued accessToken (see
+// routes/auth.js) instead of a client-claimed userId string — this is the
+// "only registered users can call each other" enforcement point: there is no
+// longer any way to speak on this socket as a user you didn't verify
+// ownership of via email OTP.
 function onRegister(ws, msg) {
-  const { userId } = msg;
-  if (!userId || typeof userId !== 'string') {
-    sendError(ws, undefined, 'bad-request', 'register requires a userId string');
+  const { accessToken } = msg;
+  if (!accessToken || typeof accessToken !== 'string') {
+    sendError(ws, undefined, 'bad-request', 'register requires an accessToken');
     return;
   }
+
+  let payload;
+  try {
+    payload = tokens.verifyAccessToken(accessToken);
+  } catch (err) {
+    logger.warn('Rejected register: invalid/expired accessToken -', err.message);
+    send(ws, { type: T.REGISTERED, ok: false, reason: 'invalid-token' });
+    return;
+  }
+
+  const userId = payload.username;
   if (clientRegistry.isRegistered(userId)) {
     send(ws, { type: T.REGISTERED, userId, ok: false, reason: 'id-in-use' });
     return;
   }
   clientRegistry.register(userId, ws);
+  ws.userProfile = { id: payload.sub, email: payload.email, username: userId };
   logger.log('Registered', userId);
   send(ws, { type: T.REGISTERED, userId, ok: true });
+
+  // A call-invite sent while this user was unreachable (app closed, woken
+  // via FCM below) never reached them over a socket — redeliver it now that
+  // they've reconnected, so the ringing UI actually surfaces instead of the
+  // notification leading nowhere.
+  const session = callStore.findActiveByUser(userId);
+  if (session && session.state === 'ringing' && session.calleeId === userId) {
+    send(ws, { type: T.CALL_INVITE, callId: session.callId, from: session.callerId });
+  }
 }
 
-function onCallInvite(ws, msg) {
+// Keyed off the socket's own authenticated identity (set by onRegister),
+// never the message body — otherwise any registered client could plant a
+// push token for someone else's username.
+function onRegisterPushToken(ws, msg) {
+  const { token } = msg;
+  const userId = ws.userId;
+  if (!userId) {
+    sendError(ws, undefined, 'not-registered', 'register-push-token requires registering first');
+    return;
+  }
+  if (!token) {
+    sendError(ws, undefined, 'bad-request', 'register-push-token requires a token');
+    return;
+  }
+  pushTokenStore.set(userId, token);
+  logger.log('Stored push token for', userId);
+}
+
+async function onCallInvite(ws, msg) {
   const { callId, from, to } = msg;
   if (!callId || !from || !to) {
     sendError(ws, callId, 'bad-request', 'call-invite requires callId, from, to');
-    return;
-  }
-  const calleeWs = clientRegistry.get(to);
-  if (!calleeWs) {
-    sendError(ws, callId, 'callee-unavailable', `${to} is not online`);
     return;
   }
   if (callStore.findActiveByUser(to)) {
@@ -140,10 +184,33 @@ function onCallInvite(ws, msg) {
     return;
   }
 
-  callStore.create(callId, from, to, (timedOutCallId) => onRingTimeoutFired(timedOutCallId), RING_TIMEOUT_MS);
+  const calleeWs = clientRegistry.get(to);
+  if (calleeWs) {
+    callStore.create(callId, from, to, (timedOutCallId) => onRingTimeoutFired(timedOutCallId), RING_TIMEOUT_MS);
+    send(calleeWs, { type: T.CALL_INVITE, callId, from });
+    send(ws, { type: T.CALL_RING, callId, to });
+    return;
+  }
 
-  send(calleeWs, { type: T.CALL_INVITE, callId, from });
-  send(ws, { type: T.CALL_RING, callId, to });
+  const delivered = await tryPushInvite(ws, callId, from, to);
+  if (!delivered) sendError(ws, callId, 'callee-unavailable', `${to} is not online`);
+}
+
+// Callee has no live socket — wake them via FCM instead, if we have a token
+// for them. Keeps the same call session/ring-timeout bookkeeping as the
+// normal path, so a reconnect redelivers the invite (see onRegister above)
+// and an unanswered push still times out the same way a normal ring would.
+async function tryPushInvite(callerWs, callId, from, to) {
+  const token = pushTokenStore.get(to);
+  if (!token) return false;
+
+  const sent = await pushSender.sendCallInvitePush(token, { callId, from, to });
+  if (!sent) return false;
+
+  callStore.create(callId, from, to, (timedOutCallId) => onRingTimeoutFired(timedOutCallId), RING_TIMEOUT_MS);
+  send(callerWs, { type: T.CALL_RING, callId, to });
+  logger.log('Sent FCM call-invite push to', to, 'for', callId);
+  return true;
 }
 
 function onRingTimeoutFired(callId) {
